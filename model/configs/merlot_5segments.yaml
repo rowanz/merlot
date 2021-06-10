@@ -1,0 +1,82 @@
+# Train at a size of 384x384 for 10 more epochs
+# This is used for the unshuffling experiments
+data:
+  train_file: "TRAIN_FILE_PATH"
+  val_file: ""
+  clean_asr_prob: 0.5
+
+  random_scale_max: 1.5
+  random_scale_min: 1.125
+
+  num_chunks: 30
+  chunk_text_len: 32
+  augment_prob: 0.8
+  shuffle_chunks: True
+
+model:
+  init_checkpoint: "USE_PRETRAIN4_CKPT"
+  transpose_input: True
+
+  num_chunks_in_group: 5
+  masking_use_attn: True
+  masking_rate: 0.2
+  masking_do_spanbert: True
+  masking_choose_topk_prob: 0.5
+  image_shuffle_prob: 0.5
+  text_shuffle_prob: 0.5
+  masking_spanbert_len_probs: [0.625,0.25,0.125] # Roughly the same as [0.625, 0.25, 0.125] which says EV = 2.0
+  resnet_layers: [3, 4, 9]
+
+  do_projection: True
+  do_bias: True
+
+  image_size: [384, 384]
+  patch_size: 16
+  spatial_pool_size: 2
+  use_bfloat16: True
+  vocab_size: 50370
+  hidden_size: 768
+  contrastive_size: 768
+
+  contrast_coef: 0.5
+  contrast_temp: 0.05
+
+  attention_probs_dropout_prob: 0.0
+  hidden_dropout_prob: 0.1
+  hidden_act: "gelu"
+  initializer_range: 0.02
+  intermediate_size: 3072
+  max_position_embeddings: 1024
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  num_vision_transformer_hidden_layers: 12
+  num_lang_transformer_hidden_layers: 12
+
+  share_params: True
+
+device:
+  use_tpu: True
+  num_tpu_cores: 1024
+  tpu_run_config: None # This will get loaded in
+  output_dir: "OUTPUT_DIR"
+  train_batch_size: 1024
+  val_batch_size: 16
+  iterations_per_loop: 20000
+  experimental_host_call_every_n_steps: 2
+
+optimizer:
+  type: "adam_optimizer"
+  learning_rate: 0.00002
+  num_train_steps: 60000 # 5 epochs
+  num_warmup_steps: 10000
+  weight_decay_rate: 0.1
+  beta_2: 0.98
+  clip_norm: 0.0
+  adafactor: False
+  use_bfloat16_adam: True
+  verbose: False
+
+  # Anything matching one of the regex conditions will have the parameters overridden.
+  param_overrides: [
+    [["LayerNorm", "layer_norm", 'GroupNorm', "bias"], {"weight_decay_rate": 0}],
+  ]
