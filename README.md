@@ -51,10 +51,12 @@ pip install numpy==1.17.0
 
 
 ### Bibtex
+```
 @article{zellersluhessel2021merlot,
     title={MERLOT: Multimodal Neural Script Knowledge Models},
     author={Zellers, Rowan and Lu, Ximing and Hessel, Jack and Yu, Youngjae and Park, Jae Sung and Cao, Jize and Farhadi, Ali and Choi, Yejin},
     journal={arXiv preprint arXiv:2106.02636},
     year={2021}
 }
+```
 
