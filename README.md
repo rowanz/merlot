@@ -42,8 +42,9 @@ pip install numpy==1.17.0
 ```
 
 ### Pretraining from scratch
-* First, you'll need to get a bunch of training data in "tfrecord" format, and put it in "TRAIN_FILE_PATH". See data processing in [data/](data/) for that.
-* Next, in the `model` directory, run `python train.py configs/pretrain.yaml`
+This requires a large TPU pod for data-parallelism.
+* First, you'll need to get a bunch of training data in "tfrecord" format --  see data processing in [data/](data/) for that. You'll then need to adjust the configuration of [model/configs/merlot.yaml](model/configs/merlot.yaml) accordingly. You'll also need to add in your output path (where you want your newly pretrained model to be saved).
+* Next, in the `model` directory, run `python train.py configs/merlot.yaml`
 
 ### Finetuning on downstream tasks
 * We used the configuration [model/merlot.yaml](model/merlot.yaml) and the checkpoint at `gs://merlot/checkpoint_4segments/` for downstream task finetuning. This is slightly different than the checkpoint we used for story unshuffling (that we had to adapt to account for the 5 frame-caption segments for that task), but both should work.
