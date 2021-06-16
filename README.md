@@ -47,7 +47,9 @@ This requires a large TPU pod for data-parallelism.
 * Next, in the `model` directory, run `python train.py configs/merlot.yaml`
 
 ### Finetuning on downstream tasks
-* We used the configuration [model/merlot.yaml](model/merlot.yaml) and the checkpoint at `gs://merlot/checkpoint_4segments/` for downstream task finetuning. This is slightly different than the checkpoint we used for story unshuffling (that we had to adapt to account for the 5 frame-caption segments for that task), but both should work.
+* You can download our checkpoint using [download_checkpoint.py](download_checkpoint.py). There are two options -- we used a checkpoint with 4 frame-caption segments for general purpose pretraining, and then we trained it for longer (using 5 frame-caption segments) to adapt to the story ordering task. 
+
+  We suggest using the *4 segments* checkpoint because that's what we used for all of our finetuning experiments. This corresponds to the configuration at We used the configuration [model/merlot.yaml](model/merlot.yaml).
 * Actual finetuning code TBD -- you just create a `MerlotModel` [model/modeling.py](model/modeling.py), set up your finetuning task (usually involving an additional output layer), and finetune.
 
 
