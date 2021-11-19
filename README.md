@@ -1,7 +1,7 @@
 # merlot
 [MERLOT: Multimodal Neural Script Knowledge Models](https://arxiv.org/abs/2106.02636)
 
-MERLOT is a model for learning what we are calling "neural script knowledge" -- representations about what is going on in videos, spanning multiple video frames with associated captions.
+MERLOT (NeurIPS 2021) is a model for learning what we are calling "neural script knowledge" -- representations about what is going on in videos, spanning multiple video frames with associated captions.
 
 
 Visit our project page at [rowanzellers.com/merlot](https://rowanzellers.com/merlot), or read the [full paper](https://arxiv.org/abs/2106.02636) to learn more.
@@ -55,11 +55,12 @@ This requires a large TPU pod for data-parallelism.
 
 ### Bibtex
 ```
-@article{zellersluhessel2021merlot,
-    title={MERLOT: Multimodal Neural Script Knowledge Models},
-    author={Zellers, Rowan and Lu, Ximing and Hessel, Jack and Yu, Youngjae and Park, Jae Sung and Cao, Jize and Farhadi, Ali and Choi, Yejin},
-    journal={arXiv preprint arXiv:2106.02636},
-    year={2021}
+@inproceedings{zellersluhessel2021merlot,
+  title={MERLOT: Multimodal Neural Script Knowledge Models},
+  author={Zellers, Rowan and Lu, Ximing and Hessel, Jack and Yu, Youngjae and Park, Jae Sung and Cao, Jize and Farhadi, Ali and Choi, Yejin},
+  booktitle={Advances in Neural Information Processing Systems 34},
+  year={2021}
 }
+
 ```
 
