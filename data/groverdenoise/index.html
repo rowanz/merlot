@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+       name="viewport"
+       content="width=device-width,initial-scale=1, shrink-to-fit=no">
+
+    <title>denoiser</title>
+
+    <!-- bootstrap -->
+    <link
+       rel="stylesheet"
+       href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css"
+       integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO"
+       crossorigin="anonymous">
+  </head>
+  <body>
+    <!--'subreddit', 'title', 'noisyasr', 'cleanasr'-->
+    <main class="col-lg-12" role="main">
+      <h1 class="display-4">Rowan Denoiser</h1>
+      <h4>Copy paste the ASR text and it'll try to clean it up</h4>
+      <div class="alert alert-warning">
+        Model details: {{ model_details }}
+      </div>
+      <div class="mb-3">
+      <div class="input-group">
+        <div class="input-group-prepend"><span class="input-group-text">Noisy ASR</span></div>
+        <textarea class="form-control" name="noisyasr" rows="15"></textarea>
+        <div class="input-group-append">
+          <button class="btn btn-secondary" type="button" id="submitnoisyasr">Generate</button>
+        </div></div>
+        <small id="noisyasrhelp" class="form-text text-muted">Example:
+          <p>i remember being at the point of tears during the workday and then going home and sobbing in my bed about my awful inhuman manager Back then i didnt know that when people fall into jerk mode they are fearful i didnt understand how fear works we dont teach that subject in school but we should managers get more fearful than the rest of us because they have more to prove they have scarier people to please as they travel up the organizational chart if youre A manager the Biggest danger you face is the state where your team wont talk to you in a human way anymore because youve reacted badly too Many times When They tried to do that in the past when You put up a false front and fail to tune in and listen to your employees youve already failed as a leader</p>
+        </small>
+      </div>
+
+      <div class="mb-3">
+      <div class="input-group">
+        <div class="input-group-prepend"><span class="input-group-text">Clean ASR</span></div>
+        <textarea class="form-control" name="cleanasr" rows="10" readonly="True"></textarea>
+        <div class="input-group-append">
+          <button class="btn btn-primary" type="button" id="submitcleanasr">Generate</button>
+        </div>
+      </div>
+      <small id="cleanasrhelp" class="form-text text-muted">GT for that example: <p>I remember being at the point of tears during the workday and then going home and sobbing in my bed about my awful, inhuman manager. Back then I didn’t know that when people fall into Jerk Mode, they are fearful. I didn’t understand how fear works! We don’t teach that subject in school, but we should. Managers get more fearful than the rest of us, because they have more to prove. They have scarier people to please as they travel up the organizational chart. If you’re a manager, the biggest danger you face is the state where your team won’t talk to you in a human way anymore, because you’ve reacted badly too many times when they tried to do that in the past. When you put up a false front and fail to tune in and listen to your employees, you’ve already failed as a leader.</p></small>
+      </div>
+
+      <div id="problems"> </div>
+    </main>
+
+<!-- Bootstrap JS and it's dependencies -->
+<script
+   src="https://code.jquery.com/jquery-3.3.1.slim.min.js"
+   integrity="sha384-q8i/X+965DzO0rT7abK41JStQIAqVgRVzpbzo5smXKp4YfRvH+8abtTE1Pi6jizo"
+   crossorigin="anonymous">
+</script>
+<script
+   src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.3/umd/popper.min.js"
+   integrity="sha384-ZMP7rVo3mIykV+2+9J3UJ46jBk0WLaUAdn689aCwoqbBJiSnjAK/l8WvCWPIPm49"
+   crossorigin="anonymous">
+</script>
+<script
+   src="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/js/bootstrap.min.js"
+   integrity="sha384-ChfqqxuZUCnJSK3+MXmPNIyE6ZbWh2IMqE241rYiqJxyMiZ6OW/JmZQ5stwEULTy"
+   crossorigin="anonymous">
+</script>
+
+<script>
+var fields = ['noisyasr', 'cleanasr'];
+var searchParams = new URLSearchParams(window.location.search);
+
+function get_formdata() {
+  var formdata = {};
+  for (var i=0; i < fields.length; i++) {
+    formdata[fields[i]] = $('textarea[name="' + fields[i] + '"]').val();
+    searchParams.set(fields[i], formdata[fields[i]]);
+  }
+
+  var newRelativePathQuery = window.location.pathname + '?' + searchParams.toString();
+  history.pushState(null, '', newRelativePathQuery);
+  return formdata;
+}
+
+function generate(formdata, target) {
+  if (fields.indexOf(target) === -1) {
+    alert("Looks like you tried generating " + target + " but that's not one of the valid fields. wtf");
+    return ''
+  }
+  formdata["target"] = target;
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/ask', true);
+  xhr.setRequestHeader('Content-type', 'application/json');
+  xhr.onreadystatechange = function() {
+    if (xhr.readyState == 4 && xhr.status == 200) {
+      var resp =JSON.parse(xhr.responseText)
+      $('textarea[name="' + target + '"]').val(resp['gen']);
+      $('#problems').empty();
+
+      var waiting_msg = $('<div class="alert alert-info">');
+      waiting_msg.append('perplexity of the noisy ASR is ' + resp['ppl'].toFixed(2));
+      $('#problems').append(waiting_msg);
+    }
+  };
+  xhr.send(JSON.stringify(formdata));
+  var waiting_msg = $('<div class="alert alert-danger">');
+  waiting_msg.append('waiting for response. sorry, this could take up to a minute.');
+  $('#problems').append(waiting_msg);
+}
+
+$( document ).ready(function() {
+  for (let i=0; i < fields.length; i++) {
+    $('#submit' + fields[i]).on('click', function () {
+      generate(get_formdata(), fields[i]);
+    });
+
+    if (searchParams.has(fields[i])) {
+      $('textarea[name="' + fields[i] + '"]').val(searchParams.get(fields[i]));
+    }
+  }
+});
+</script>
+
+  </body>
+</html>
