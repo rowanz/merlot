@@ -1,18 +1,3 @@
-# Original work Copyright 2018 The Google AI Language Team Authors.
-# Modified work Copyright 2019 Rowan Zellers
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import copy
 import json
 import math
@@ -20,7 +5,6 @@ import math
 import six
 import tensorflow as tf
 
-# from lm import optimization_adafactor
 from lm.utils import get_assignment_map_from_checkpoint, get_shape_list, get_attention_mask, gelu, layer_norm, dropout, \
     construct_scalar_host_call
 
@@ -394,7 +378,11 @@ def _top_p_sample(logits, ignore_ids=None, num_samples=1, p=0.9):
 
     return {
         'probs': probs,
+        # 'cumsum': cumulative_probabilities,
         'sample': sample,
+        # 'indices_sorted': indices,
+        # 'logits_masked': logits_to_use,
+        # 'logits_raw': tf.batch_gather(logits_to_use, indices),
     }
 
 
@@ -469,9 +457,10 @@ class GroverModel(object):
             self.input_ids = input_ids[:, :-1]
         else:
             self.input_ids = input_ids
-            self.target_ids = tf.concat((input_ids[:, 1:],
-                                         tf.constant(self.pad_token_id, dtype=self.input_ids.dtype,
-                                                     shape=[get_shape_list(self.input_ids, 2)[0], 1])), 1)
+            self.target_ids = tf.concat([
+                input_ids[:, 1:],
+                tf.fill([get_shape_list(self.input_ids, 2)[0], 1], self.pad_token_id),
+            ], 1)
 
         self.batch_size, self.seq_length = get_shape_list(self.input_ids, 2)
 
@@ -543,14 +532,14 @@ class GroverModel(object):
         logprobs_flat = tf.nn.log_softmax(self.logits_flat, axis=-1)
         return tf.reshape(logprobs_flat, [self.batch_size, self.seq_length, -1])
 
-    def lm_loss(self):
+    def lm_loss(self, is_target, target_bonus=4.0):
         """
+        :param is_target: [batch_size, seq_length] int32 with 1 if it's the "target" (so maybe we weight it differently)? and 0 otherwise.
+        :param target_bonus: Increase the loss on the targets by this much.
         :return: stuff
         """
         target_ids_flat = tf.reshape(self.target_ids, [-1])
-
-        # 1 if it's valid and 0 otherwise.
-        label_weights = tf.cast(tf.not_equal(target_ids_flat, self.pad_token_id), dtype=self.logits_flat.dtype)
+        is_target_flat = tf.reshape(is_target, [-1])
 
         # [batch_size * seq_length, vocab_size]
         one_hot_labels = tf.one_hot(target_ids_flat,
@@ -562,12 +551,18 @@ class GroverModel(object):
 
         per_example_loss = -tf.reduce_sum(logprobs_flat * one_hot_labels, axis=[-1])
 
-        # per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=self.logits_flat, labels=target_ids_flat)
+        label_weights = tf.cast(tf.not_equal(target_ids_flat, self.pad_token_id), dtype=self.logits_flat.dtype)
+        label_weights += tf.cast(is_target_flat, dtype=tf.float32) * target_bonus
 
-        numerator = tf.reduce_sum(label_weights * per_example_loss)
         denominator = tf.reduce_sum(label_weights) + 1e-5
-        loss = numerator / denominator
-        return loss
+
+        ctx_loss = tf.reduce_sum(
+            tf.cast(1 - is_target_flat, dtype=tf.float32) * label_weights * per_example_loss) / denominator
+        trg_loss = tf.reduce_sum(
+            tf.cast(is_target_flat, dtype=tf.float32) * label_weights * per_example_loss) / denominator
+
+        loss = tf.reduce_sum(label_weights * per_example_loss) / denominator
+        return loss, ctx_loss, trg_loss
 
     def pooled_output(self, clf_token):
         """
@@ -580,7 +575,7 @@ class GroverModel(object):
 
 
 def model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
-                     num_train_steps, num_warmup_steps, use_tpu):
+                     num_train_steps, num_warmup_steps, use_tpu, target_bonus=4.0):
     """Returns `model_fn` closure for TPUEstimator."""
 
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -591,6 +586,7 @@ def model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
             tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
 
         input_ids = features["input_ids"]
+        is_target = features['is_target'][:, 1:]  # TBD do something with this
 
         is_training = (mode == tf.estimator.ModeKeys.TRAIN)
 
@@ -602,7 +598,7 @@ def model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
             chop_off_last_token=True,
         )
 
-        total_loss = model.lm_loss()
+        total_loss, ctx_loss, trg_loss = model.lm_loss(is_target, target_bonus=target_bonus)
 
         if is_training:
             train_op, train_metrics = optimization_adafactor.create_optimizer(
@@ -613,11 +609,18 @@ def model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
             train_metrics = {}
             tvars = tf.trainable_variables()
 
+        train_metrics['ctx_loss'] = ctx_loss
+        train_metrics['trg_loss'] = trg_loss
+
         initialized_variable_names = {}
         scaffold_fn = None
         if init_checkpoint:
             (assignment_map, initialized_variable_names
              ) = get_assignment_map_from_checkpoint(tvars, init_checkpoint)
+            if 'global_step' in assignment_map:
+                del assignment_map['global_step']
+                del initialized_variable_names['global_step:0']
+
             if use_tpu:
                 def tpu_scaffold():
                     tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
@@ -675,28 +678,13 @@ def model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
             better_than_gt = model.log_probs > gt_logprobs[:, :, None]
             top_p_required = tf.reduce_sum(tf.cast(better_than_gt, tf.float32) * tf.exp(model.log_probs), axis=2)
 
-            # No top-p sampling for now, since this seems to be too slow on TPUs
-            if use_tpu:
-                predictions = tf.reshape(
-                    tf.random.categorical(logits=model.logits_flat, num_samples=1),
-                    get_shape_list(model.target_ids),
-                )
-            else:
-                # Argmax
-                # predictions = tf.math.argmax(model.log_probs, axis=-1, output_type=tf.int32)
-                predictions = tf.reshape(
-                    _top_p_sample(model.logits_flat, num_samples=1, p=0.99)['sample'],
-                    get_shape_list(model.target_ids),
-                )
-            pred_logprobs = tf.squeeze(tf.batch_gather(model.log_probs, predictions[:, :, None]), axis=2)
-
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
                 predictions={'gt_logprobs': gt_logprobs,
                              'top_p_required': top_p_required,
-                             'predictions': predictions,
-                             'pred_logprobs': pred_logprobs,
-                             'labels': input_ids},
+                             'is_target': features['is_target'],
+                             'labels': input_ids,
+                             },
                 scaffold_fn=scaffold_fn)
         return output_spec
 
@@ -732,7 +720,10 @@ def sample_step(tokens, ignore_ids, news_config, batch_size=1, p_for_topp=0.95, 
 
     # Extract the FINAL SEQ LENGTH
     batch_size_times_seq_length, vocab_size = get_shape_list(model.logits_flat, expected_rank=2)
-    next_logits = tf.reshape(model.logits_flat, [batch_size, -1, vocab_size])[:, -1]
+    prev_probs = tf.exp(tf.squeeze(tf.batch_gather(model.log_probs[:, :-1], tokens[:, 1:, None]), axis=2))
+
+    logits = tf.reshape(model.logits_flat, [batch_size, -1, vocab_size])
+    next_logits = logits[:, -1]
 
     if do_topk:
         sample_info = _top_k_sample(next_logits, num_samples=1, k=tf.cast(p_for_topp, dtype=tf.int32))
@@ -744,6 +735,8 @@ def sample_step(tokens, ignore_ids, news_config, batch_size=1, p_for_topp=0.95, 
     return {
         'new_tokens': new_tokens,
         'new_probs': new_probs,
+        'new_probs_all': tf.nn.softmax(next_logits, dim=-1),
+        'prev_probs': prev_probs,
         'new_cache': model.new_kvs,
     }
 
@@ -762,11 +755,12 @@ def initialize_from_context(initial_context, ignore_ids, news_config, p_for_topp
 
 
 def sample(news_config: GroverConfig, initial_context, eos_token, ignore_ids=None, p_for_topp=0.95,
-           do_topk=False):
+           do_topk=False, max_len=1025):
     """
     V1 version of: sample outputs from a model, and do it all at once
     :param news_config: Configuration used to construct the model
-    :param initial_context: [batch_size, seq_length] that we'll start generating with
+    :param initial_context: [batch_size, seq_length] that we'll start generating with.
+                            Everything in the batch must be the same size.
     :param eos_token: Stop generating if you see this (tf scalar)
     :param ignore_ids: NEVER GENERATE THESE [vocab_size]
     :return:
@@ -802,7 +796,7 @@ def sample(news_config: GroverConfig, initial_context, eos_token, ignore_ids=Non
             return tf.math.logical_not(tf.reduce_all(tf.reduce_any(is_eos, axis=1)))
 
         tokens, cache, probs = tf.while_loop(
-            cond=cond, body=body, maximum_iterations=1025 - get_shape_list(ctx)[1],
+            cond=cond, body=body, maximum_iterations=max_len - get_shape_list(ctx)[1],
             loop_vars=[ctx, cache, probs],
             shape_invariants=[tf.TensorShape([batch_size, None]),
                               tf.TensorShape(
@@ -816,133 +810,95 @@ def sample(news_config: GroverConfig, initial_context, eos_token, ignore_ids=Non
     return tokens, probs
 
 
-def classification_model_fn_builder(config: GroverConfig, init_checkpoint, learning_rate,
-                                    num_train_steps, num_warmup_steps, use_tpu, num_labels, pool_token_id,
-                                    adafactor=False, adam_bfloat=False, lm_loss_coef=0.5):
-    """Returns `model_fn` closure for TPUEstimator. FOR CLASSIFICATION ONLY!"""
+def sample_seq2seq(news_config: GroverConfig, initial_context, eos_token, ignore_ids=None, p_for_topp=0.95,
+                   do_topk=False, max_len=1025):
+    """
+    Sample multiple outputs for a model in a seq2seq way.
 
-    def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
-        """The `model_fn` for TPUEstimator."""
+    :param news_config: Configuration used to construct the model
+    :param initial_context: [batch_size, seq_length] that we'll start generating with.
+                            Invalid entries are padded.
+    :param eos_token: Stop generating if you see this (tf scalar)
+    :param ignore_ids: NEVER GENERATE THESE [vocab_size]
+    :return:
+    """
+    batch_size, ctxb_end = get_shape_list(initial_context, expected_rank=2)
+    # This just says 'ignore the pad character'
+    if ignore_ids is None:
+        ignore_ids = tf.constant([x == 0 for x in range(news_config.vocab_size)], dtype=tf.bool)
 
-        tf.logging.info("*** Features ***")
-        for name in sorted(features.keys()):
-            tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
+    with tf.name_scope('sample_sequence'):
+        # Not everything might be the same size so we need to get lens
 
-        input_ids = features["input_ids"]
-        label_ids = features["label_ids"]
-        if "is_real_example" in features:
-            is_real_example = tf.cast(features["is_real_example"], dtype=tf.float32)
-        else:
-            is_real_example = tf.ones(tf.shape(label_ids), dtype=tf.float32)
+        lens = tf.reduce_sum(tf.cast(tf.not_equal(initial_context, news_config.pad_token_id), dtype=tf.int32), axis=1)
 
-        is_training = (mode == tf.estimator.ModeKeys.TRAIN)
+        seq_is_valid = tf.greater(lens, 0)
+        ctxb_start = tf.reduce_min(tf.where(seq_is_valid, lens, ctxb_end * tf.ones_like(lens)))
 
-        # Create model with aux loss
-        model = GroverModel(
-            config=config,
-            is_training=is_training,
-            input_ids=input_ids,
-            pad_token_id=config.pad_token_id,
-            chop_off_last_token=False,
-        )
+        initial_ctx_part_a = tf.identity(initial_context[:, :ctxb_start])
+        initial_ctx_part_b = tf.identity(initial_context[:, ctxb_start:])
 
-        with tf.variable_scope('classification'):
-            hidden_state = model.pooled_output(pool_token_id)
-            if is_training:
-                hidden_state = dropout(hidden_state, dropout_prob=0.1)
-            logits = tf.layers.dense(
-                hidden_state,
-                num_labels,
-                kernel_initializer=create_initializer(config.initializer_range),
-                name='logits'
+        # Initial call to get cache
+        context_output = sample_step(tokens=initial_ctx_part_a, ignore_ids=ignore_ids, news_config=news_config,
+                                     batch_size=batch_size, p_for_topp=p_for_topp, cache=None, do_topk=do_topk)
+
+        def _append_new_tokens(current_ctx, new_tokens):
+            """ At each step we add tokens. Sometimes those tokens conflict with what we already have.
+                This function fixes that. It doesnt fix probabilities though!"""
+            current_ctx_len = get_shape_list(current_ctx, expected_rank=2)[1]
+
+            new_tokens = tf.cond(
+                current_ctx_len < ctxb_end,
+                true_fn=lambda: tf.where(
+                    tf.equal(initial_ctx_part_b[:, current_ctx_len - ctxb_start], news_config.pad_token_id),
+                    new_tokens,
+                    initial_ctx_part_b[:, current_ctx_len - ctxb_start]),
+                false_fn=lambda: new_tokens,
             )
-            log_probs = tf.nn.log_softmax(logits, axis=-1)
-            one_hot_labels = tf.one_hot(label_ids, depth=num_labels, dtype=tf.float32)
-            per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
-            class_loss = tf.reduce_mean(per_example_loss)
+            # import ipdb
+            # ipdb.set_trace()
+            # if current_ctx_len < ctxb_end:
+            #     existing_tokens = initial_ctx_part_b[:,current_ctx_len-ctxb_start]
+            #
+            #     new_tokens=tf.where(tf.equal(existing_tokens, news_config.pad_token_id),
+            #              new_tokens,
+            #              existing_tokens)
 
-        total_loss = lm_loss_coef * model.lm_loss() + class_loss
+            return tf.concat([current_ctx, new_tokens[:, None]], 1)
 
-        if is_training:
-            train_op, train_metrics = optimization_adafactor.create_optimizer(
-                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
-            # tvars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
-            tvars = tf.trainable_variables()
+        ctx = _append_new_tokens(initial_ctx_part_a, context_output['new_tokens'])
+        cache = context_output['new_cache']
+        probs = tf.concat([context_output['prev_probs'],
+                           tf.batch_gather(context_output['new_probs_all'], ctx[:, -1,None])], 1)
 
-            train_metrics['minibatch_cls_loss'] = class_loss
-            train_metrics['minibatch_acc'] = tf.reduce_mean(
-                tf.cast(tf.equal(tf.argmax(logits, axis=-1, output_type=tf.int32),
-                                 label_ids), tf.float32))
-        else:
-            train_op = None
-            train_metrics = {}
-            tvars = tf.trainable_variables()
+        def body(ctx, cache, probs):
+            """ for whatever reason this didn't work when I ran it on more than one at once... ugh."""
+            next_outputs = sample_step(ctx[:, -1][:, None], ignore_ids=ignore_ids, news_config=news_config,
+                                       batch_size=batch_size, p_for_topp=p_for_topp, cache=cache,
+                                       do_topk=do_topk)
 
-        initialized_variable_names = {}
-        scaffold_fn = None
-        if init_checkpoint:
-            (assignment_map, initialized_variable_names
-             ) = get_assignment_map_from_checkpoint(tvars, init_checkpoint)
-            if use_tpu:
-                def tpu_scaffold():
-                    tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
-                    return tf.train.Scaffold()
+            # Update everything. We might need to use the old tokens.
+            new_cache = tf.concat([cache, next_outputs['new_cache']], axis=-2)
+            new_ids = _append_new_tokens(ctx, next_outputs['new_tokens'])
+            new_probs = tf.concat([probs, tf.batch_gather(next_outputs['new_probs_all'], new_ids[:, -1,None])], 1)
+            return [new_ids, new_cache, new_probs]
 
-                scaffold_fn = tpu_scaffold
-            else:
-                tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+        def cond(ctx, cache, probs):
+            is_eos = tf.equal(ctx, eos_token)
+            seq_is_eos = tf.math.logical_or(tf.reduce_any(is_eos, axis=1), tf.math.logical_not(seq_is_valid))
 
-        tf.logging.info("**** Trainable Variables ****")
-        for var in tvars:
-            init_string = ""
-            if var.name in initialized_variable_names:
-                init_string = ", *INIT_FROM_CKPT*"
-            tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
-                            init_string)
+            return tf.math.logical_not(tf.reduce_all(seq_is_eos))
 
-        output_spec = None
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            if use_tpu:
-                output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                    mode=mode,
-                    loss=total_loss,
-                    train_op=train_op,
-                    host_call=construct_scalar_host_call(metric_dict=train_metrics, model_dir=params['model_dir'],
-                                                         prefix='training/'),
-                    scaffold_fn=scaffold_fn)
-            else:
-                output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                    mode=mode,
-                    loss=total_loss,
-                    train_op=train_op,
-                    training_hooks=[
-                        tf.train.LoggingTensorHook({'loss': tf.metrics.mean(total_loss)[1]}, every_n_iter=100)],
-                    scaffold_fn=scaffold_fn)
-
-        elif mode == tf.estimator.ModeKeys.EVAL:
-            def metric_fn(per_example_loss, label_ids, logits, is_real_example):
-                predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
-                accuracy = tf.metrics.accuracy(
-                    labels=label_ids, predictions=predictions, weights=is_real_example)
-                loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
-                return {
-                    "eval_accuracy": accuracy,
-                    "eval_loss": loss,
-                }
-
-            eval_metrics = (metric_fn,
-                            [per_example_loss, label_ids, logits, is_real_example])
-            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode,
-                loss=total_loss,
-                eval_metrics=eval_metrics,
-                scaffold_fn=scaffold_fn)
-        else:
-            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
-                mode=mode,
-                predictions={'logits': logits,
-                             'probs': tf.nn.softmax(logits, axis=-1)},
-                scaffold_fn=scaffold_fn)
-        return output_spec
-
-    return model_fn
+        tokens, cache, probs = tf.while_loop(
+            cond=cond, body=body, maximum_iterations=max_len - get_shape_list(ctx)[1],
+            loop_vars=[ctx, cache, probs],
+            shape_invariants=[tf.TensorShape([batch_size, None]),
+                              tf.TensorShape(
+                                  [batch_size, news_config.num_hidden_layers, 2,
+                                   news_config.num_attention_heads,
+                                   None, news_config.hidden_size // news_config.num_attention_heads]),
+                              tf.TensorShape([batch_size, None]),
+                              ],
+            back_prop=False,
+        )
+    return tokens, probs
